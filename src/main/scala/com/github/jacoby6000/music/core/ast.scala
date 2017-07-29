@@ -4,11 +4,11 @@ object ast {
   case class KeySignature(note: Duration, beats: Int)
 
   sealed trait Accidental
-  sealed trait Flattie extends Accidental
-  sealed trait Sharpie extends Accidental
-  case object Flat extends Flattie with Accidental
-  case object Sharp extends Sharpie with Accidental
-  case object Normal extends Accidental with Flattie with Sharpie
+  sealed trait Flattie extends Accidental // Until I come up with a better name...
+  sealed trait Sharpie extends Accidental // Same here
+  case object Flat extends Flattie
+  case object Sharp extends Sharpie
+  case object Natural extends Flattie with Sharpie with Accidental // All notes can be natural
 
   sealed trait Pitch
   case class A(accidental: Accidental) extends Pitch
@@ -46,5 +46,6 @@ object ast {
   case class Repeated[T](segment: T, times: Int) extends Segment[T]
   case class Section[T](time: KeySignature, dynamics: Dynamics, segment: T) extends Segment[T]
   case class Notes[T](notes: List[Note]) extends Segment[T]
+  case class Together[T](segments: List[T]) extends Segment[T]
   case class And[T](left: T, right: T) extends Segment[T]
 }

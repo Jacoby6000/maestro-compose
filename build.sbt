@@ -60,9 +60,14 @@ scalacOptions ++= Seq(
 )
 
 libraryDependencies ++= Seq(
-  "org.scalacheck" %% "scalacheck"   % "1.13.4",
-  "com.slamdata" %% "matryoshka-core" % "0.21.0",
-  "org.specs2" %% "specs2-core" % "3.8.9" % "test,it"
+  "org.scalacheck" %% "scalacheck"   % "1.13.4", // for doing tests with arbitrary data
+  "com.slamdata" %% "matryoshka-core" % "0.21.0", // for managing recursion schemes
+
+  // for parsing various song file formats
+  "com.lihaoyi" %% "fastparse" % "0.4.3",
+  "org.scodec" %% "scodec-core" % "1.10.3",
+
+  "org.specs2" %% "specs2-core" % "3.8.9" % "test,it" // for testing
 )
 
 

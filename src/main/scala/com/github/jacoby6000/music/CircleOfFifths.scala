@@ -8,7 +8,7 @@ object CircleOfFifths extends App {
     accidental match {
       case Sharp => "♯"
       case Flat => "♭"
-      case Normal => "♮"
+      case Natural => "♮"
     }
 
   def pitchToString(pitch: Pitch): String =
@@ -22,5 +22,5 @@ object CircleOfFifths extends App {
       case G(accidental) => "G" + accidentalToString(accidental)
     }
 
-  println(Stream.iterate(C(Normal): Pitch)(Root(_).perfect).map(pitchToString).take(100).toVector.mkString("\n"))
+  println(Stream.iterate(C(Natural): Pitch)(Root(_).perfect).map(pitchToString).take(100).toVector.mkString("\n"))
 }
