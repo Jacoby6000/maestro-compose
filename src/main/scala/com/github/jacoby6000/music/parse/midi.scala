@@ -19,7 +19,7 @@ object midi {
   case object SingleTrack extends Format
   case object MultiTrack extends Format
   case object MultiTrackSequential extends Format
-  
+
   sealed trait Division
   case class TicksPerQuarter(ticks: Int) extends Division
   case class Frames(framesPerSecond: Int, ticksPerFrame: Int) extends Division
@@ -117,14 +117,14 @@ object midi {
       def decode(bits: BitVector): Attempt[DecodeResult[VariableLengthQuantity]] = {
         def go(bs: BitVector, carry: Int, consumed: Int): Either[String, (Int, BitVector)] = {
           bs.consume(8) { bv =>
-            val byte = bv.toByte(false)
-            val numeric = byte >> 1
-            val continue = if (byte - (numeric << 1) == 1) true else false
+            val continue = !bv.last
+            val numeric = bv.tail.toInt()
 
             Right((carry << 7 + numeric, continue))
           }.flatMap {
-            case (bv, (c, true)) => go(bv, c, consumed + 8)
             case (bv, (c, false)) => Right((c, bv))
+            case (bv, (c, true)) if(consumed != 32) => go(bv, c, consumed + 8)
+            case (bv, (c, _)) => Right((c, bv))
           }
         }
 
@@ -236,7 +236,7 @@ object midi {
       case ((adr, n), p) =>
         Attempt.failure(Err(
           s"Invalid command specified. statusByte: " +
-            s"${Array(ByteVector(adr.toByte << 4 + n.toByte))}, " +
+            s"${(adr.toByte << 4 + n.toByte).toHexString.toUpperCase}, " +
             s"n: $n, " +
             s"k: $p"
         ))
@@ -248,7 +248,7 @@ object midi {
     }
 
     type CoPro = ((Int, Int), Int) :+: (((Int, Int), Int), Int) :+: CNil
-    ((uint4 ~ uint4 ~ uint16) :+: (uint4 ~ uint4 ~ uint16 ~ uint16)).exmap[MidiEvent](
+    ((uint4 ~ uint4 ~ uint16)).exmap[MidiEvent](
       {
         case Inl(x) => handleMidiChannelModeEventDecode(x) orElse handleTwoParamEventDecode(x)
         case Inr(Inl(x)) => handleThreeParamEventDecode(x)
@@ -259,11 +259,11 @@ object midi {
         case chan: MidiChannelModeEvent => handleMidiChannelModeEventEncode(chan).map(Coproduct[CoPro](_))
         case three: ThreeParamMidiEvent => handleThreeParamEventEncode(three).map(Coproduct[CoPro](_))
       }
-    ).choice
+    ).choice.withContext("midi")
   }
 
   val sysexEventCodec: Codec[SysexEvent] = {
-    (uint8 ~ variableSizeBytes(variableInt, bytes)).exmap(
+    (uint8 ~ variableSizeBytes(variableInt, bytes)).exmap[SysexEvent](
       {
         case (0xF0, bytes) => Attempt.successful(F0Sysex(bytes))
         case (0xF7, bytes) => Attempt.successful(F7Sysex(bytes))
@@ -276,7 +276,7 @@ object midi {
         case F0Sysex(byteVec) => Attempt.successful((0xF0, byteVec))
         case F7Sysex(byteVec) => Attempt.successful((0xF7, byteVec))
       }
-    )
+    ).withContext("sysex")
   }
 
   val metaEventCodec: Codec[MetaEvent] = {
@@ -288,9 +288,9 @@ object midi {
         {
           case SMTPEOffset(h, m, s, fr, ff) => ((((h, m), s), fr), ff)
         }
-      )
+      ).withContext("smtpe")
 
-    (constant(hex"0xFF") ~ uint8 ~ variableSizeBytes(variableInt, bits)).exmap(
+    (constant(hex"0xFF") ~ uint8 ~ variableSizeBytes(variableInt, bits)).exmap[MetaEvent](
       {
         case (((), 0x00), bitVec) => uint16.decodeValue(bitVec).map(SequenceNumber(_))
         case (((), 0x01), bitVec) => ascii.decodeValue(bitVec).map(TextEvent(_))
@@ -345,7 +345,7 @@ object midi {
         case KeySignature(sf, bool) => (int16 ~ uint16).encode((sf, if(bool) 1 else 0)).map((((), 0x59), _))
         case SequencerSpecificMetaEvent(id, vec) => (constrainedVariableSizeBytes(int(3), int24, 1, 3) ~ bytes).encode((id, vec)).map((((), 0x7F), _))
       }
-    )
+    ).withContext("meta")
   }
 
   val headerCodec: Codec[Header] =
@@ -376,8 +376,8 @@ object midi {
     }
 
   val trackCodec: Codec[Track] =
-    (chunkTypeCodec :: variableLengthQuantity :: eventCodec).as[Track]
+    (chunkTypeCodec.withContext("chunktype") :: variableLengthQuantity.withContext("deltatime") :: variableSizeBits(variableInt, eventCodec).withContext("event")).withContext("track").as[Track]
 
   val fileCodec =
-    headerCodec ~ list(trackCodec)
+    (headerCodec ~ list(trackCodec)).withContext("file")
 }
