@@ -1,7 +1,7 @@
 organization := "com.github.jacoby6000"
 name := "music-thing"
 version := "0.0.1-SNAPSHOT"
-scalaVersion := "2.12.2"
+scalaVersion := "2.12.3"
 
 resolvers += Resolver.sonatypeRepo("releases")
 
@@ -70,5 +70,7 @@ libraryDependencies ++= Seq(
   "org.specs2" %% "specs2-core" % "3.8.9" % "test,it" // for testing
 )
 
-
-
+scalacOptions in (Compile, console) ~= (_.filterNot(Set(
+  "-Ywarn-unused:imports",
+  "-Xfatal-warnings"
+)))

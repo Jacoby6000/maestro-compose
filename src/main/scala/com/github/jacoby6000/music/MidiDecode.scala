@@ -6,7 +6,9 @@ import java.nio.file.Paths
 import scodec.bits.BitVector
 
 object MidiDecode extends App {
-  val bits = BitVector(Files.readAllBytes(Paths.get("/home/jbarber/Downloads/lttlef.mid")))
+  val bits = BitVector(Files.readAllBytes(Paths.get("/Users/jacobbarber/Downloads/lttlef.mid")))
   println(bits.toHex)
   println(parse.midi.fileCodec.decodeValue(bits))
+
+
 }

@@ -27,19 +27,17 @@ object midi {
   sealed trait Event
   sealed trait MidiEvent extends Event
   sealed trait MidiVoiceEvent extends MidiEvent
-  sealed trait ThreeParamMidiEvent extends MidiVoiceEvent
-  sealed trait TwoParamMidiEvent extends MidiVoiceEvent
   sealed trait MidiChannelModeEvent extends MidiEvent
   sealed trait SysexEvent extends Event
   sealed trait MetaEvent extends Event
 
-  case class NoteOff(channel: Int, key: Int, velocity: Int) extends ThreeParamMidiEvent
-  case class NoteOn(channel: Int, key: Int, velocity: Int) extends ThreeParamMidiEvent
-  case class KeyPressure(channel: Int, key: Int, pressure: Int) extends ThreeParamMidiEvent
-  case class ControllerChange(channel: Int, controller: Int, value: Int) extends ThreeParamMidiEvent
-  case class ProgramChange(channel: Int, program: Int) extends TwoParamMidiEvent
-  case class ChannelKeyPressure(channel: Int, pressure: Int) extends TwoParamMidiEvent
-  case class PitchBend(channel: Int, leastSig: Int, mostSig: Int) extends ThreeParamMidiEvent
+  case class NoteOff(channel: Int, key: Int, velocity: Int) extends MidiVoiceEvent
+  case class NoteOn(channel: Int, key: Int, velocity: Int) extends MidiVoiceEvent
+  case class KeyPressure(channel: Int, key: Int, pressure: Int) extends MidiVoiceEvent
+  case class ControllerChange(channel: Int, controller: Int, value: Int) extends MidiVoiceEvent
+  case class ProgramChange(channel: Int, program: Int) extends MidiVoiceEvent
+  case class ChannelKeyPressure(channel: Int, pressure: Int) extends MidiVoiceEvent
+  case class PitchBend(channel: Int, leastSig: Int, mostSig: Int) extends MidiVoiceEvent
 
   case class AllSoundOff(channel: Int) extends MidiChannelModeEvent
   case class ResetAllControllers(channel: Int) extends MidiChannelModeEvent
@@ -68,11 +66,13 @@ object midi {
   case class TimeSignature(numerator: Int, denominator: Int, clocksPerMetronome: Int, thirtySecondNotesPerTwentyFourMidiClocks: Int) extends MetaEvent
   case class KeySignature(numAccidentals: Int, minor: Boolean) extends MetaEvent
   case class SequencerSpecificMetaEvent(id: Int, data: ByteVector) extends MetaEvent
-
-  case class VariableLengthQuantity(n: Int)
+  case class UnknownMetaEvent(evType: Int, data: BitVector) extends MetaEvent
 
   case class Header(chunkType: ChunkType, format: Format, tracks: Int, division: Division)
-  case class Track(chunkType: ChunkType, deltaTime: VariableLengthQuantity, event: Event)
+  case class Track(chunkType: ChunkType, events: List[TrackEvent])
+  case class TrackEvent(deltaTime: Int, event: Event)
+
+  val twoUint8 = uint8 ~ uint8
 
   val chunkTypeCodec: Codec[ChunkType] = {
     fixedSizeBytes(ChunkType.bytes, ascii).xmap[ChunkType](
@@ -88,51 +88,6 @@ object midi {
       }
     )
   }
-
-  val variableLengthQuantity: Codec[VariableLengthQuantity] =
-    new Codec[VariableLengthQuantity] {
-      val sizeBound: SizeBound = SizeBound(8, Some(32))
-
-      def encode(value: VariableLengthQuantity): Attempt[BitVector] = {
-        val resultThing =
-          value.n.toBinaryString
-            .sliding(7, 7)
-            .map(_.reverse.padTo(7, "0").reverse.mkString)
-            .map(x => if (x.contains("1")) x + "1" else x + "0")
-            .toVector
-
-        val refinedResult =
-          resultThing
-            .find(_.endsWith("0"))
-            .map(_ => resultThing)
-            .getOrElse {
-              val last = resultThing.last
-              val updatedLast = last.dropRight(1) + "0"
-              resultThing.dropRight(1) :+ updatedLast
-            }.map(Integer.parseInt(_, 2).toByte)
-
-        Attempt.successful(BitVector(refinedResult.toArray))
-      }
-
-      def decode(bits: BitVector): Attempt[DecodeResult[VariableLengthQuantity]] = {
-        def go(bs: BitVector, carry: Int, consumed: Int): Either[String, (Int, BitVector)] = {
-          bs.consume(8) { bv =>
-            val continue = !bv.last
-            val numeric = bv.tail.toInt()
-
-            Right((carry << 7 + numeric, continue))
-          }.flatMap {
-            case (bv, (c, false)) => Right((c, bv))
-            case (bv, (c, true)) if(consumed != 32) => go(bv, c, consumed + 8)
-            case (bv, (c, _)) => Right((c, bv))
-          }
-        }
-
-        Attempt.fromEither(go(bits, 0, 0).fold(e => Left(Err(e)), x => Right(DecodeResult(VariableLengthQuantity(x._1), x._2))))
-      }
-    }
-
-  private val variableInt: Codec[Int] = variableLengthQuantity.xmap(_.n,VariableLengthQuantity)
 
   val formatCodec: Codec[Format] = {
     uint16.exmap(
@@ -167,103 +122,59 @@ object midi {
   }
 
   val midiEventCodec: Codec[MidiEvent] = {
-
-    val handleMidiChannelModeEventDecode: ((Int, Int), Int) => Attempt[MidiChannelModeEvent] = {
-      case ((n, 0x78), 0x00) => Attempt.successful(AllSoundOff(n))
-      case ((n, 0x79), 0x00) => Attempt.successful(ResetAllControllers(n))
-      case ((n, 0x7A), 0x00) => Attempt.successful(LocalControl(n, false))
-      case ((n, 0x7A), 0x7F) => Attempt.successful(LocalControl(n, true))
-      case ((n, 0x7A), x) =>
-        Attempt.failure(Err(
-          s"Invalid value supplied for byte 3 in Midi Channel Mode Event 'Local Control' (0x7A)" +
-            s"for channel ${n.toHexString.toUpperCase}. " +
-            s"Got ${x.toHexString.toUpperCase} expected 0x00 (off) or 0x7F (on)."
-        ))
-      case ((n, 0x7B), 0x00) => Attempt.successful(AllNotesOff(n))
-      case ((n, 0x7C), 0x00) => Attempt.successful(OmniModeOff(n))
-      case ((n, 0x7D), 0x00) => Attempt.successful(OmniModeOn(n))
-      case ((n, 0x7E), m) => Attempt.successful(MonoModeOn(n, m))
-      case ((n, 0x7F), 0x00) => Attempt.successful(PolyModeOn(n))
-      case ((_, adr), m) =>
-        Attempt.failure(Err(
-          s"Invalid command issued for MidiChannelModeEvent. " +
-            s"Got command id ${adr.toHexString.toUpperCase} " +
-            s"with data ${m.toHexString.toUpperCase}. " +
-            s"The Command id should be between 0x78 and 0x7F. If your command was in this range, " +
-            s"ensure that the correct data value (usually 0x00) is set."
-        ))
-    }
-
-    val handleMidiChannelModeEventEncode: MidiChannelModeEvent => Attempt[((Int, Int), Int)] = {
-      case AllSoundOff(n) => Attempt.successful(((n, 0x78), 0x00))
-      case ResetAllControllers(n) => Attempt.successful(((n, 0x79), 0x00))
-      case LocalControl(n, false) => Attempt.successful(((n, 0x7A), 0x00))
-      case LocalControl(n, true) => Attempt.successful(((n, 0x7A), 0x7F))
-      case AllNotesOff(n) => Attempt.successful(((n, 0x7B), 0x00))
-      case OmniModeOff(n) => Attempt.successful(((n, 0x7C), 0x00))
-      case OmniModeOn(n) => Attempt.successful(((n, 0x7D), 0x00))
-      case MonoModeOn(n, m) => Attempt.successful(((n, 0x7E), m))
-      case PolyModeOn(n) => Attempt.successful(((n, 0x7F), 0x00))
-    }
-
-    val handleThreeParamEventDecode: (((Int, Int), Int), Int) => Attempt[ThreeParamMidiEvent] = {
-        case (((0x8, n), k), v) => Attempt.successful(NoteOff(n, k, v))
-        case (((0x9, n), k), v) => Attempt.successful(NoteOn(n, k, v))
-        case (((0xA, n), k), v) => Attempt.successful(KeyPressure(n, k, v))
-        case (((0xB, n), k), v) => Attempt.successful(ControllerChange(n, k, v))
-        case (((0xE, n), k), v) => Attempt.successful(PitchBend(n, k, v))
-        case (((adr, n), k), v) =>
-          Attempt.failure(Err(
-            s"Invalid command specified. statusByte: " +
-              s"${(adr << 4 + n).toHexString.toUpperCase}, " +
-              s"n: ${n.toHexString.toUpperCase}, " +
-              s"k: ${k.toHexString.toUpperCase}, " +
-              s"v: ${v.toHexString.toUpperCase}"
-          ))
-      }
-
-    val handleThreeParamEventEncode: ThreeParamMidiEvent => Attempt[(((Int, Int), Int), Int)] = {
-      case NoteOff(n, k, v) => Attempt.successful((((0x8, n), k), v))
-      case NoteOn(n, k, v) => Attempt.successful((((0x9, n), k), v))
-      case KeyPressure(n, k, v) => Attempt.successful((((0xA, n), k), v))
-      case ControllerChange(n, k, v) => Attempt.successful((((0xB, n), k), v))
-      case PitchBend(n, k, v) => Attempt.successful((((0xE, n), k), v))
-    }
-
-    val handleTwoParamEventDecode: ((Int, Int), Int) => Attempt[TwoParamMidiEvent] = {
-      case ((0xC, n), p) => Attempt.successful(ProgramChange(n, p))
-      case ((0xD, n), p) => Attempt.successful(ChannelKeyPressure(n, p))
-      case ((adr, n), p) =>
-        Attempt.failure(Err(
-          s"Invalid command specified. statusByte: " +
-            s"${(adr.toByte << 4 + n.toByte).toHexString.toUpperCase}, " +
-            s"n: $n, " +
-            s"k: $p"
-        ))
-    }
-
-    val handleTwoParamEventEncode: TwoParamMidiEvent => Attempt[((Int, Int), Int)] = {
-      case ProgramChange(n, p) => Attempt.successful(((0xC, n), p))
-      case ChannelKeyPressure(n, p) => Attempt.successful(((0xD, n), p))
-    }
-
-    type CoPro = ((Int, Int), Int) :+: (((Int, Int), Int), Int) :+: CNil
-    ((uint4 ~ uint4 ~ uint16)).exmap[MidiEvent](
+    (uint4.withContext("adr") ~ uint4.withContext("chan") ~ bits).exmap[MidiEvent](
       {
-        case Inl(x) => handleMidiChannelModeEventDecode(x) orElse handleTwoParamEventDecode(x)
-        case Inr(Inl(x)) => handleThreeParamEventDecode(x)
-        case Inr(Inr(_)) => throw new Exception("This is literally actually impossible.")
+        case ((0x8, chan), bs) => twoUint8.withContext("note-off").decodeValue(bs).map(x => NoteOff(chan, x._1, x._2))
+        case ((0x9, chan), bs) => twoUint8.withContext("note-on").decodeValue(bs).map(x => NoteOn(chan, x._1, x._2))
+        case ((0xA, chan), bs) => twoUint8.withContext("key-pressure").decodeValue(bs).map(x => KeyPressure(chan, x._1, x._2))
+        case ((0xC, chan), bs) => uint8.withContext("program-change").decodeValue(bs).map(ProgramChange(chan, _))
+        case ((0xD, chan), bs) => uint8.withContext("channel-key-pressure").decodeValue(bs).map(ChannelKeyPressure(chan, _))
+        case ((0xE, chan), bs) => twoUint8.withContext("pitch-bend").decodeValue(bs).map(x => PitchBend(chan, x._1, x._2))
+        case ((0xB, chan), bs1) =>
+          (uint8 ~ bits).withContext("voice").decodeValue(bs1).flatMap {
+            case (0x78, bs) => uint8.decodeValue(bs).map(_ => AllSoundOff(chan))
+            case (0x79, bs) => uint8.decodeValue(bs).map(_ => ResetAllControllers(chan))
+            case (0x7A, bs) => uint8.decodeValue(bs).flatMap {
+              case 0x00 => Attempt.successful(LocalControl(chan, false))
+              case 0x7F => Attempt.successful(LocalControl(chan, true))
+              case other => Attempt.failure(Err(
+                s"Unexpected value for LocalControl (0xBn7A) message. " +
+                s"Got ${other.toHexString.toUpperCase} expected 0x00 (off) or 0x7F (on)."
+              ))
+            }
+            case (0x7B, bs) => uint8.decodeValue(bs).map(_ => AllNotesOff(chan))
+            case (0x7C, bs) => uint8.decodeValue(bs).map(_ => OmniModeOff(chan))
+            case (0x7D, bs) => uint8.decodeValue(bs).map(_ => OmniModeOn(chan))
+            case (0x7E, bs) => uint8.decodeValue(bs).map(MonoModeOn(chan, _))
+            case (0x7F, bs) => uint8.decodeValue(bs).map(_ => PolyModeOn(chan))
+            case (k, bs) => uint8.decodeValue(bs).map(v => ControllerChange(chan, k, v))
+          }
+        case ((adr, _), _) =>
+          Attempt.failure(Err(s"Unexpected event type ${adr.toHexString.toUpperCase}"))
       },
       {
-        case two: TwoParamMidiEvent => handleTwoParamEventEncode(two).map(Coproduct[CoPro](_))
-        case chan: MidiChannelModeEvent => handleMidiChannelModeEventEncode(chan).map(Coproduct[CoPro](_))
-        case three: ThreeParamMidiEvent => handleThreeParamEventEncode(three).map(Coproduct[CoPro](_))
+        case NoteOff(n, k, v) => twoUint8.encode((k, v)).map(((0x8, n), _))
+        case NoteOn(n, k, v) => twoUint8.encode((k, v)).map(((0x9, n), _))
+        case KeyPressure(n, k, v) => twoUint8.encode((k, v)).map(((0xA, n), _))
+        case ControllerChange(n, k, v) => twoUint8.encode((k, v)).map(((0xB, n), _))
+        case ProgramChange(n, k) => uint8.encode(k).map(((0xC, n), _))
+        case ChannelKeyPressure(n, k) => uint8.encode(k).map(((0xD, n), _))
+        case PitchBend(n, k, v) => twoUint8.encode((k, v)).map(((0xE, n), _))
+        case AllSoundOff(n) => Attempt.successful(((0xB, n), hex"0x7800".bits))
+        case ResetAllControllers(n) => Attempt.successful(((0xB, n), hex"0x7900".bits))
+        case LocalControl(n, false) => Attempt.successful(((0xB, n), hex"0x7A00".bits))
+        case LocalControl(n, true) => Attempt.successful(((0xB, n), hex"0x7A7F".bits))
+        case AllNotesOff(n) => Attempt.successful(((0xB, n), hex"0x7B00".bits))
+        case OmniModeOff(n) => Attempt.successful(((0xB, n), hex"0x7C00".bits))
+        case OmniModeOn(n) => Attempt.successful(((0xB, n), hex"0x7D00".bits))
+        case MonoModeOn(n, m) => uint8.encode(m).map(x => ((0xB, n), (hex"0x7E" ++ ByteVector(Array(x.toByte(false)))).bits))
+        case PolyModeOn(n) => Attempt.successful(((0xB, n), hex"0x7F00".bits))
       }
-    ).choice.withContext("midi")
+    ).withContext("midi")
   }
 
   val sysexEventCodec: Codec[SysexEvent] = {
-    (uint8 ~ variableSizeBytes(variableInt, bytes)).exmap[SysexEvent](
+    (uint8 ~ variableSizeBytes(vint, bytes)).exmap[SysexEvent](
       {
         case (0xF0, bytes) => Attempt.successful(F0Sysex(bytes))
         case (0xF7, bytes) => Attempt.successful(F7Sysex(bytes))
@@ -290,16 +201,16 @@ object midi {
         }
       ).withContext("smtpe")
 
-    (constant(hex"0xFF") ~ uint8 ~ variableSizeBytes(variableInt, bits)).exmap[MetaEvent](
+    (constant(hex"0xFF") ~ uint8 ~ bits).exmap[MetaEvent](
       {
-        case (((), 0x00), bitVec) => uint16.decodeValue(bitVec).map(SequenceNumber(_))
-        case (((), 0x01), bitVec) => ascii.decodeValue(bitVec).map(TextEvent(_))
-        case (((), 0x02), bitVec) => ascii.decodeValue(bitVec).map(CopyrightNotice(_))
-        case (((), 0x03), bitVec) => ascii.decodeValue(bitVec).map(SequenceName(_))
-        case (((), 0x04), bitVec) => ascii.decodeValue(bitVec).map(InstrumentName(_))
-        case (((), 0x05), bitVec) => ascii.decodeValue(bitVec).map(Lyric(_))
-        case (((), 0x06), bitVec) => ascii.decodeValue(bitVec).map(Marker(_))
-        case (((), 0x07), bitVec) => ascii.decodeValue(bitVec).map(CuePoint(_))
+        case (((), 0x00), bitVec) => uint8.decodeValue(bitVec).map(SequenceNumber(_))
+        case (((), 0x01), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(TextEvent(_))
+        case (((), 0x02), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(CopyrightNotice(_))
+        case (((), 0x03), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(SequenceName(_))
+        case (((), 0x04), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(InstrumentName(_))
+        case (((), 0x05), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(Lyric(_))
+        case (((), 0x06), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(Marker(_))
+        case (((), 0x07), bitVec) => variableSizeBytes(vint, ascii).decodeValue(bitVec).map(CuePoint(_))
         case (((), 0x20), bitVec) =>
           (uint8 ~ uint8).decodeValue(bitVec).flatMap {
             case (0x01, cc) => Attempt.successful(MIDIChannelPrefix(cc))
@@ -308,15 +219,15 @@ object midi {
                 s"Got ${addr.toHexString.toUpperCase} expected 0x01 for event 0x20."
             ))
           }
-        case (((), 0x2F), _) => Attempt.successful(EndOfTrack)
+        case (((), 0x2F), bitVec) => uint16.decodeValue(bitVec).map(_ => EndOfTrack)
         case (((), 0x51), bitVec) => uint24.decodeValue(bitVec).map(SetTempo(_))
         case (((), 0x54), bitVec) => smtpeOffsetCodec.decodeValue(bitVec)
         case (((), 0x58), bitVec) =>
-          (uint16 ~ uint16 ~ uint16 ~ uint16).decodeValue(bitVec).map {
+          (uint8 ~ uint8 ~ uint8 ~ uint8).decodeValue(bitVec).map {
             case (((nn, dd), cc), bb) => TimeSignature(nn, dd, cc, bb)
           }
         case (((), 0x59), bitVec) =>
-          (int16 ~ uint16).decodeValue(bitVec).flatMap {
+          (int8 ~ uint8).decodeValue(bitVec).flatMap {
             case (sf, 0) => Attempt.successful(KeySignature(sf, false))
             case (sf, 1) => Attempt.successful(KeySignature(sf, true))
             case (_, x) => Attempt.failure(Err(
@@ -327,6 +238,8 @@ object midi {
           (constrainedVariableSizeBytes(int(3), int24, 1, 3) ~ bytes).decodeValue(bitVec).map {
             case (n, leftover) => SequencerSpecificMetaEvent(n, leftover)
           }
+
+        case (((), adr), bitVec) => Attempt.successful(UnknownMetaEvent(adr, bitVec))
       },
       {
         case SequenceNumber(n) => uint16.encode(n).map(x => (((), 0x00), x))
@@ -344,6 +257,7 @@ object midi {
         case TimeSignature(nn, dd, cc, bb) => (uint16 ~ uint16 ~ uint16 ~ uint16).encode((((nn, dd), cc), bb)).map((((), 0x58), _))
         case KeySignature(sf, bool) => (int16 ~ uint16).encode((sf, if(bool) 1 else 0)).map((((), 0x59), _))
         case SequencerSpecificMetaEvent(id, vec) => (constrainedVariableSizeBytes(int(3), int24, 1, 3) ~ bytes).encode((id, vec)).map((((), 0x7F), _))
+        case UnknownMetaEvent(adr, bv) => Attempt.successful((((), adr), bv))
       }
     ).withContext("meta")
   }
@@ -369,15 +283,28 @@ object midi {
           meta.encode(value) orElse
           midi.encode(value)
 
-      def decode(bits: BitVector): Attempt[DecodeResult[Event]] =
+      def decode(bits: BitVector): Attempt[DecodeResult[Event]] = {
+        println(bits)
         sysex.decode(bits) orElse
           meta.decode(bits) orElse
           midi.decode(bits)
+      }
     }
 
   val trackCodec: Codec[Track] =
-    (chunkTypeCodec.withContext("chunktype") :: variableLengthQuantity.withContext("deltatime") :: variableSizeBits(variableInt, eventCodec).withContext("event")).withContext("track").as[Track]
+    (chunkTypeCodec.withContext("chunktype") ::
+      variableSizeBytesLong(
+        uint32,
+        list((vint.withContext("deltatime") ::
+          eventCodec.withContext("event")).as[TrackEvent])
+      )
+    ).withContext("track").as[Track]
 
   val fileCodec =
     (headerCodec ~ list(trackCodec)).withContext("file")
+
+
+  implicit class AOps[A](val a: A) extends AnyVal {
+    def |>>(f: A => Unit): A = {f(a); a}
+  }
 }
