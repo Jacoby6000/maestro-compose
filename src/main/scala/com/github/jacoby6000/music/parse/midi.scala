@@ -122,7 +122,7 @@ object midi {
     ).choice
   }
 
-  val midiEventCodec: Codec[MidiEvent] = {
+  def midiEventCodec: Codec[Codec[MidiEvent]] = {
     def threeParamCodec[A](f: (Int, Int, Int) => A)(g: A => (Int, Int, Int)) =
       (uint4 ~ twoUint8).xmap[A](
         x => f(x._1, x._2._1, x._2._2),
@@ -201,15 +201,16 @@ object midi {
         ))
       }
 
-    discriminated[MidiEvent]
+
+    discriminated[Codec[MidiEvent]]
       .by(uint4)
-      .typecase(0x8, noteOffCodec.withContext("note-off"))
-      .typecase(0x9, noteOnCodec.withContext("note-on"))
-      .typecase(0xA, keyPressureCodec.withContext("key-pressure"))
-      .typecase(0xB, controllerChangeOrChannelModeCodec)
-      .typecase(0xC, programChangeCodec.withContext("program-change"))
-      .typecase(0xD, channelKeyPressureCodec.withContext("channel-key-pressure"))
-      .typecase(0xE, pitchBendCodec.withContext("pitch-bend"))
+      .typecase(0x8, provide(noteOffCodec.withContext("note-off").upcast[MidiEvent]))
+      .typecase(0x9, provide(noteOnCodec.withContext("note-on").upcast[MidiEvent]))
+      .typecase(0xA, provide(keyPressureCodec.withContext("key-pressure").upcast[MidiEvent]))
+      .typecase(0xB, provide(controllerChangeOrChannelModeCodec.upcast[MidiEvent]))
+      .typecase(0xC, provide(programChangeCodec.withContext("program-change").upcast[MidiEvent]))
+      .typecase(0xD, provide(channelKeyPressureCodec.withContext("channel-key-pressure").upcast[MidiEvent]))
+      .typecase(0xE, provide(pitchBendCodec.withContext("pitch-bend").upcast[MidiEvent]))
       .withContext("midi")
   }
 
@@ -288,9 +289,9 @@ object midi {
 
     // fallback
     val unknownMetaEvent =
-      (uint8 ~ variable(bits)).xmapc({
-        case (adr, bs) => UnknownMetaEvent(adr, bs)
-      })(ev => (ev.evType, ev.data))
+      (constant(hex"0xFF") ~ uint8 ~ variable(bits)).xmapc({
+        case (((), adr), bs) => UnknownMetaEvent(adr, bs)
+      })(ev => (((), ev.evType), ev.data))
 
 
 
@@ -330,9 +331,29 @@ object midi {
 
   val eventCodec =
     new Codec[Event] {
+
       val sysex = sysexEventCodec.upcast[Event]
       val meta = metaEventCodec.upcast[Event]
-      val midi = midiEventCodec.upcast[Event]
+      val midi = new Codec[MidiEvent] {
+        var previousCodec: Option[Codec[MidiEvent]] = None
+        var previousChannel: BitVector = BitVector(Array(0.toByte))
+
+        override def decode(bits: BitVector): Attempt[DecodeResult[MidiEvent]] =
+          midiEventCodec.decode(bits).flatMap { result =>
+            previousCodec = Some(result.value)
+            previousChannel = bits.drop(4).take(4)
+            result.value.decode(result.remainder)
+          } recoverWith {
+            case err =>
+              previousCodec.map(_.decode(previousChannel ++ bits)).getOrElse(Attempt.failure(err))
+          }
+
+        override def encode(value: MidiEvent): Attempt[BitVector] =
+          midiEventCodec.encode(provide(value))
+
+        override def sizeBound: SizeBound = SizeBound(2, None)
+      }.upcast[Event]
+
       def sizeBound: SizeBound = SizeBound(12, None)
 
       def encode(value: Event): Attempt[BitVector] =
@@ -342,17 +363,19 @@ object midi {
 
       def decode(bits: BitVector): Attempt[DecodeResult[Event]] = {
         sysex.decode(bits) orElse
-          midi.decode(bits) orElse
-          meta.decode(bits)
+          meta.decode(bits) orElse
+          midi.decode(bits)
       }
     }
 
+  val trackEventCodec =
+    (vint.withContext("deltatime") :: eventCodec.withContext("event")).as[TrackEvent]
+
   val trackCodec: Codec[Track] =
-    (chunkTypeCodec.withContext("chunktype").debug ::
+    (chunkTypeCodec.withContext("chunktype") ::
       variableSizeBytesLong(
         uint32,
-        list((vint.withContext("deltatime") ::
-          eventCodec.withContext("event")).debug.as[TrackEvent])
+        list(trackEventCodec)
       )
     ).withContext("track").as[Track]
 
@@ -361,7 +384,7 @@ object midi {
 
   implicit class CodecOps[A](val codec: Codec[A]) extends AnyVal {
     def debug: Codec[A] = codec.xmap(_ |>> println, _ |>> println)
-    //def peekRemaining: Codec[A] = (peek(bits).debug :: codec)
+    //def peekRemaining: Codec[A] = (peek(bits) :: codec)
   }
 
   implicit class AOps[A](val a: A) extends AnyVal {
