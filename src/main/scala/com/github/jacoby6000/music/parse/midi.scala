@@ -336,8 +336,17 @@ object midi {
       val meta = metaEventCodec.upcast[Event]
       val midi = new Codec[MidiEvent] {
 
+
         // to deal with running status codes, we keep track of the previously successful codec, and
         // the channel that was used with that codec.
+        // Normal midi events are structured as scdddd
+        // s represents status code
+        // c represents channel
+        // dddd is data
+        //
+        // In the normal case, your events are formatted as (scdddd)(scdddd)(scdddd) and so on, repeating the pattern.
+        // In other cases whenever the status and channel are unchanged, events appear as (scdddd)(dddd)(dddd)
+
         var previousCodec: Option[Codec[MidiEvent]] = None
         var previousChannel: BitVector = BitVector(Array(0.toByte))
 
