@@ -335,16 +335,21 @@ object midi {
       val sysex = sysexEventCodec.upcast[Event]
       val meta = metaEventCodec.upcast[Event]
       val midi = new Codec[MidiEvent] {
+
+        // to deal with running status codes, we keep track of the previously successful codec, and
+        // the channel that was used with that codec.
         var previousCodec: Option[Codec[MidiEvent]] = None
         var previousChannel: BitVector = BitVector(Array(0.toByte))
 
         override def decode(bits: BitVector): Attempt[DecodeResult[MidiEvent]] =
           midiEventCodec.decode(bits).flatMap { result =>
+            // if we successfully decode, update our vars
             previousCodec = Some(result.value)
             previousChannel = bits.drop(4).take(4)
             result.value.decode(result.remainder)
           } recoverWith {
             case err =>
+              // if we fail to decode, try using our vars, otherwise report the error as normal
               previousCodec.map(_.decode(previousChannel ++ bits)).getOrElse(Attempt.failure(err))
           }
 
