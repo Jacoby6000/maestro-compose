@@ -1,5 +1,5 @@
 organization := "com.github.jacoby6000"
-name := "music-thing"
+name := "maestro-compose"
 version := "0.0.1-SNAPSHOT"
 scalaVersion := "2.12.3"
 
@@ -60,9 +60,7 @@ libraryDependencies ++= Seq(
   "org.scalacheck" %% "scalacheck"   % "1.13.4", // for doing tests with arbitrary data
   "com.slamdata" %% "matryoshka-core" % "0.21.0", // for managing recursion schemes
 
-  // for parsing various song file formats
-  "com.lihaoyi" %% "fastparse" % "0.4.3",
-  "org.scodec" %% "scodec-core" % "1.10.3",
+  "com.github.jacoby6000" %% "maestro-midi" % "0.1.0",
 
   "org.specs2" %% "specs2-core" % "3.8.9" % "test,it" // for testing
 )
